@@ -36,6 +36,7 @@
     self.mapView.showsScale = YES;
     self.mapView.showsTraffic = NO;
     self.mapView.mapType = MKMapTypeStandard;
+    self.mapView.showsUserLocation = YES;
     [self.view addSubview:self.mapView];
 
     // Initial default coordinate: Paris Eiffel Tower (48.8584, 2.2945)
@@ -58,10 +59,10 @@
     self.userPin.subtitle = [NSString stringWithFormat:@"%.6f, %.6f", initLat, initLon];
     [self.mapView addAnnotation:self.userPin];
 
-    // 3. Tap to Teleport Gesture
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleMapTap:)];
-    tap.numberOfTapsRequired = 1;
-    [self.mapView addGestureRecognizer:tap];
+    // 3. Long-Press to Teleport Gesture
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMapLongPress:)];
+    lp.minimumPressDuration = 0.40;
+    [self.mapView addGestureRecognizer:lp];
 
     // 4. Translucent Top Telemetry Bar
     UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark];
@@ -108,7 +109,7 @@
 
     // Tap-to-teleport guide pill
     UILabel *hintLbl = [[UILabel alloc] initWithFrame:CGRectMake(20, self.view.bounds.size.height - 90, self.view.bounds.size.width - 40, 24)];
-    hintLbl.text = @"Tap anywhere on map to teleport location";
+    hintLbl.text = @"Hold / long-press anywhere on map to teleport location";
     hintLbl.textColor = [UIColor colorWithWhite:0.85 alpha:0.95];
     hintLbl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     hintLbl.textAlignment = NSTextAlignmentCenter;
@@ -134,9 +135,9 @@
     [self.locationManager startUpdatingLocation];
 }
 
-- (void)handleMapTap:(UITapGestureRecognizer *)tap {
-    if (tap.state == UIGestureRecognizerStateEnded) {
-        CGPoint touchPt = [tap locationInView:self.mapView];
+- (void)handleMapLongPress:(UILongPressGestureRecognizer *)lp {
+    if (lp.state == UIGestureRecognizerStateBegan) {
+        CGPoint touchPt = [lp locationInView:self.mapView];
         CLLocationCoordinate2D tappedCoord = [self.mapView convertPoint:touchPt toCoordinateFromView:self.mapView];
 
         // Teleport spoofed coordinates

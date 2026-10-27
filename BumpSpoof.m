@@ -251,7 +251,9 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 @property (nonatomic, assign) double bearingDegrees;
 @property (nonatomic, assign) BOOL active;
 @property (nonatomic, copy) void (^onVectorChanged)(double bearingDegrees, double magnitude, BOOL active);
-@property (nonatomic, strong) UIPanGestureRecognizer *dragPanGesture;
+@property (nonatomic, assign) BOOL isRepositioning;
+@property (nonatomic, assign) CGPoint touchStartCenter;
+@property (nonatomic, assign) CGPoint touchStartSuper;
 @end
 
 @implementation BSJoystickView
@@ -263,6 +265,8 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
         self.layer.borderWidth = 1.5;
         self.layer.borderColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:0.75].CGColor;
         self.clipsToBounds = NO;
+        self.userInteractionEnabled = YES;
+        self.multipleTouchEnabled = NO;
 
         // Crosshairs
         CAShapeLayer *crosshair = [CAShapeLayer layer];
@@ -286,7 +290,7 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
         [self addSubview:nLbl];
 
         // Draggable knob
-        CGFloat knobSize = frame.size.width * 0.42;
+        CGFloat knobSize = frame.size.width * 0.44;
         _knobView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, knobSize, knobSize)];
         _knobView.center = CGPointMake(mid, mid);
         _knobView.backgroundColor = [UIColor colorWithRed:0.20 green:0.82 blue:0.45 alpha:0.95];
@@ -297,26 +301,8 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
         _knobView.layer.shadowOffset = CGSizeMake(0, 2);
         _knobView.userInteractionEnabled = NO;
         [self addSubview:_knobView];
-
-        // Reposition pan gesture on outer edge
-        _dragPanGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleRepositionPan:)];
-        _dragPanGesture.maximumNumberOfTouches = 1;
-        [self addGestureRecognizer:_dragPanGesture];
     }
     return self;
-}
-
-- (void)handleRepositionPan:(UIPanGestureRecognizer *)pan {
-    CGPoint loc = [pan locationInView:self];
-    CGFloat radius = self.bounds.size.width / 2.0;
-    CGFloat distFromCenter = hypot(loc.x - radius, loc.y - radius);
-
-    // If touch began in the outer rim (> 75% radius), move the entire joystick view
-    if (distFromCenter > (radius * 0.72) || pan.state == UIGestureRecognizerStateChanged) {
-        CGPoint translation = [pan translationInView:self.superview];
-        self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
-        [pan setTranslation:CGPointZero inView:self.superview];
-    }
 }
 
 - (void)updateWithTouchPoint:(CGPoint)pt {
@@ -363,23 +349,43 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
     CGPoint pt = [t locationInView:self];
     CGFloat radius = self.bounds.size.width / 2.0;
     CGFloat dist = hypot(pt.x - radius, pt.y - radius);
-    if (dist <= radius * 0.72) {
+
+    // If touch began in the outer rim (> 65% of radius), reposition the whole joystick view
+    if (dist > (radius * 0.65)) {
+        self.isRepositioning = YES;
+        self.touchStartCenter = self.center;
+        self.touchStartSuper = [t locationInView:self.superview];
+    } else {
+        self.isRepositioning = NO;
         [self updateWithTouchPoint:pt];
     }
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     UITouch *t = [touches anyObject];
-    CGPoint pt = [t locationInView:self];
-    [self updateWithTouchPoint:pt];
+    if (self.isRepositioning) {
+        CGPoint currSuper = [t locationInView:self.superview];
+        CGFloat dx = currSuper.x - self.touchStartSuper.x;
+        CGFloat dy = currSuper.y - self.touchStartSuper.y;
+        self.center = CGPointMake(self.touchStartCenter.x + dx, self.touchStartCenter.y + dy);
+    } else {
+        CGPoint pt = [t locationInView:self];
+        [self updateWithTouchPoint:pt];
+    }
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self resetKnob];
+    if (!self.isRepositioning) {
+        [self resetKnob];
+    }
+    self.isRepositioning = NO;
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self resetKnob];
+    if (!self.isRepositioning) {
+        [self resetKnob];
+    }
+    self.isRepositioning = NO;
 }
 
 @end
@@ -560,14 +566,14 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
             _enabled = YES;
             _latitude = 48.8584; // Paris / Eiffel default
             _longitude = 2.2945;
-            _targetSpeedMPS = 1.42;
+            _targetSpeedMPS = 6.0; // Responsive default speed (~22 km/h)
             [self savePrefs];
         } else {
             _enabled = [defs boolForKey:kPrefEnabledKey];
             _latitude = [defs doubleForKey:kPrefLatKey];
             _longitude = [defs doubleForKey:kPrefLonKey];
             _targetSpeedMPS = [defs doubleForKey:kPrefSpeedKey];
-            if (_targetSpeedMPS <= 0.1) _targetSpeedMPS = 1.42;
+            if (_targetSpeedMPS <= 0.1) _targetSpeedMPS = 6.0;
         }
         [self loadDefaultOrSavedGPX];
         [self startEngineTimer];
@@ -829,9 +835,16 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 
 - (UIWindowScene *)activeWindowScene {
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]] &&
-            (scene.activationState == UISceneActivationStateForegroundActive ||
-             scene.activationState == UISceneActivationStateForegroundInactive)) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            if (ws.activationState == UISceneActivationStateForegroundActive ||
+                ws.activationState == UISceneActivationStateForegroundInactive) {
+                return ws;
+            }
+        }
+    }
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
             return (UIWindowScene *)scene;
         }
     }
@@ -841,14 +854,14 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 - (void)setupUI {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindowScene *ws = [self activeWindowScene];
-        if (!ws) {
-            [self performSelector:@selector(setupUI) withObject:nil afterDelay:1.0];
-            return;
-        }
 
         if (!self.overlayWindow) {
-            self.overlayWindow = [[BSPassthroughWindow alloc] initWithWindowScene:ws];
-            self.overlayWindow.frame = ws.coordinateSpace.bounds;
+            if (ws) {
+                self.overlayWindow = [[BSPassthroughWindow alloc] initWithWindowScene:ws];
+                self.overlayWindow.frame = ws.coordinateSpace.bounds;
+            } else {
+                self.overlayWindow = [[BSPassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            }
             self.overlayWindow.backgroundColor = [UIColor clearColor];
             self.overlayWindow.windowLevel = UIWindowLevelAlert + 100.0;
             self.overlayWindow.hidden = NO;
@@ -858,7 +871,9 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
             rootVC.view.userInteractionEnabled = YES;
             self.overlayWindow.rootViewController = rootVC;
         } else {
-            self.overlayWindow.windowScene = ws;
+            if (ws && self.overlayWindow.windowScene != ws) {
+                self.overlayWindow.windowScene = ws;
+            }
             self.overlayWindow.hidden = NO;
         }
 
@@ -1034,9 +1049,9 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 }
 
 - (void)speedChanged:(UISegmentedControl *)seg {
-    if (seg.selectedSegmentIndex == 0) self.targetSpeedMPS = 1.42;      // Walk (~5.1 km/h)
-    else if (seg.selectedSegmentIndex == 1) self.targetSpeedMPS = 5.50; // Bike (~19.8 km/h)
-    else self.targetSpeedMPS = 13.88;                                   // Drive (~50 km/h)
+    if (seg.selectedSegmentIndex == 0) self.targetSpeedMPS = 3.00;      // Walk (~10.8 km/h)
+    else if (seg.selectedSegmentIndex == 1) self.targetSpeedMPS = 10.00; // Bike (~36 km/h)
+    else self.targetSpeedMPS = 25.00;                                   // Drive (~90 km/h)
     [self savePrefs];
 }
 
@@ -1212,13 +1227,25 @@ static void BSSwizzleDelegateClass(Class delClass) {
         Method swizReq = class_getInstanceMethod(mgrClass, @selector(bs_requestLocation));
         if (origReq && swizReq) method_exchangeImplementations(origReq, swizReq);
 
+        void (^triggerUI)(NSNotification *) = ^(NSNotification *note) {
+            (void)note;
+            [[BumpSpoofManager shared] setupUI];
+        };
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:triggerUI];
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:^(NSNotification * _Nonnull note) {
-            (void)note;
+                                                      usingBlock:triggerUI];
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeVisibleNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:triggerUI];
+        dispatch_async(dispatch_get_main_queue(), ^{
             [[BumpSpoofManager shared] setupUI];
-        }];
+        });
     });
 }
 
