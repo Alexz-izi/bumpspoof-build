@@ -41,7 +41,7 @@ jobs:
             -framework QuartzCore \
             -framework CoreTelephony \
             -framework SystemConfiguration \
-            -install_name "@executable_path/Frameworks/BumpSpoof.dylib" \
+            -install_name "@rpath/BumpSpoof.framework/BumpSpoof" \
             BumpSpoof.m -o BumpSpoof.dylib
           codesign -f -s - BumpSpoof.dylib
 

@@ -316,6 +316,7 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 
 @interface BumpSpoofManager : NSObject <UITextFieldDelegate>
 @property (nonatomic, assign) BOOL enabled;
+@property (nonatomic, assign) BOOL isAppActive;
 @property (nonatomic, assign) BOOL routePlaying;
 @property (nonatomic, assign) BOOL joystickActive;
 @property (nonatomic, assign) double joystickBearing;
@@ -376,6 +377,29 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
         _currentSpeed = 0.0;
         _isBroadcasting = NO;
         _idleTicks = 0;
+        _isAppActive = NO;
+
+        __weak typeof(self) weakSelf = self;
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification * _Nonnull note) {
+            (void)note;
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.isAppActive = YES;
+            [strongSelf startEngineTimer];
+            [strongSelf setupUI];
+        }];
+
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification * _Nonnull note) {
+            (void)note;
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf) strongSelf.isAppActive = NO;
+        }];
 
         [[NSNotificationCenter defaultCenter] addObserverForName:@"BumpSpoofTeleportNotification"
                                                           object:nil
@@ -408,7 +432,6 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
             if (_targetSpeedMPS <= 0.1) _targetSpeedMPS = 6.0;
         }
         [self loadDefaultOrSavedGPX];
-        [self startEngineTimer];
     }
     return self;
 }
@@ -597,6 +620,7 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 }
 
 - (void)broadcastLocationToActiveDelegates {
+    if (!self.isAppActive) return; // Do not broadcast during app splash / cold start
     CLLocation *simulatedLoc = [self spoofedLocationFromReal:nil];
     NSArray<CLLocationManager *> *managers = nil;
     @synchronized (self.activeManagers) {
@@ -958,105 +982,13 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 
 @end
 
-__attribute__((constructor)) static void BSHookModernLocationUpdate(void) {
-    Class updateCls = NSClassFromString(@"CLLocationUpdate");
-    if (updateCls) {
-        SEL locSel = NSSelectorFromString(@"location");
-        Method m = class_getInstanceMethod(updateCls, locSel);
-        if (m) {
-            IMP origIMP = method_getImplementation(m);
-            CLLocation *(*origFunc)(id, SEL) = (void *)origIMP;
-            IMP swizIMP = imp_implementationWithBlock(^CLLocation *(id selfRef) {
-                CLLocation *real = origFunc(selfRef, locSel);
-                if ([BumpSpoofManager shared].enabled) {
-                    return [[BumpSpoofManager shared] spoofedLocationFromReal:real];
-                }
-                return real;
-            });
-            method_setImplementation(m, swizIMP);
-        }
-    }
-}
-
-#pragma mark - CoreLocation Manager & Delegate Safe Swizzling
-
-static NSMutableSet<Class> *gSwizzledDelegateClasses = nil;
-
-static void BSSwizzleDelegateClass(Class delClass) {
-    if (!delClass) return;
-    @synchronized (gSwizzledDelegateClasses) {
-        if ([gSwizzledDelegateClasses containsObject:delClass]) return;
-        [gSwizzledDelegateClasses addObject:delClass];
-
-        // 1. Swizzle locationManager:didUpdateLocations:
-        SEL modernSel = @selector(locationManager:didUpdateLocations:);
-        if ([delClass instancesRespondToSelector:modernSel]) {
-            Method m = class_getInstanceMethod(delClass, modernSel);
-            if (m) {
-                const char *types = method_getTypeEncoding(m);
-                IMP origIMP = method_getImplementation(m);
-                // Ensure concrete class receives method implementation without altering superclass
-                class_addMethod(delClass, modernSel, origIMP, types);
-                m = class_getInstanceMethod(delClass, modernSel);
-                origIMP = method_getImplementation(m);
-
-                void (*origFunc)(id, SEL, CLLocationManager *, NSArray<CLLocation *> *) = (void *)origIMP;
-                id block = ^(id selfRef, CLLocationManager *manager, NSArray<CLLocation *> *locations) {
-                    [[BumpSpoofManager shared] registerManager:manager];
-                    if ([BumpSpoofManager shared].enabled) {
-                        if ([BumpSpoofManager shared].isBroadcasting) {
-                            // Forward already simulated locations without re-jittering
-                            origFunc(selfRef, modernSel, manager, locations);
-                        } else {
-                            CLLocation *sample = locations.lastObject;
-                            CLLocation *fake = [[BumpSpoofManager shared] spoofedLocationFromReal:sample];
-                            origFunc(selfRef, modernSel, manager, @[fake]);
-                        }
-                    } else {
-                        origFunc(selfRef, modernSel, manager, locations);
-                    }
-                };
-                method_setImplementation(m, imp_implementationWithBlock(block));
-            }
-        }
-
-        // 2. Swizzle legacy locationManager:didUpdateToLocation:fromLocation:
-        SEL legacySel = @selector(locationManager:didUpdateToLocation:fromLocation:);
-        if ([delClass instancesRespondToSelector:legacySel]) {
-            Method m = class_getInstanceMethod(delClass, legacySel);
-            if (m) {
-                const char *types = method_getTypeEncoding(m);
-                IMP origIMP = method_getImplementation(m);
-                class_addMethod(delClass, legacySel, origIMP, types);
-                m = class_getInstanceMethod(delClass, legacySel);
-                origIMP = method_getImplementation(m);
-
-                void (*origFunc)(id, SEL, CLLocationManager *, CLLocation *, CLLocation *) = (void *)origIMP;
-                id block = ^(id selfRef, CLLocationManager *manager, CLLocation *newLoc, CLLocation *oldLoc) {
-                    [[BumpSpoofManager shared] registerManager:manager];
-                    if ([BumpSpoofManager shared].enabled) {
-                        if ([BumpSpoofManager shared].isBroadcasting) {
-                            origFunc(selfRef, legacySel, manager, newLoc, oldLoc);
-                        } else {
-                            CLLocation *fake = [[BumpSpoofManager shared] spoofedLocationFromReal:newLoc];
-                            origFunc(selfRef, legacySel, manager, fake, oldLoc);
-                        }
-                    } else {
-                        origFunc(selfRef, legacySel, manager, newLoc, oldLoc);
-                    }
-                };
-                method_setImplementation(m, imp_implementationWithBlock(block));
-            }
-        }
-    }
-}
+#pragma mark - CoreLocation Manager Safe Interception
 
 @implementation CLLocationManager (BumpSpoof)
 
 + (void)load {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        gSwizzledDelegateClasses = [NSMutableSet new];
         Class mgrClass = [CLLocationManager class];
 
         Method origLoc = class_getInstanceMethod(mgrClass, @selector(location));
@@ -1074,23 +1006,6 @@ static void BSSwizzleDelegateClass(Class delClass) {
         Method origReq = class_getInstanceMethod(mgrClass, @selector(requestLocation));
         Method swizReq = class_getInstanceMethod(mgrClass, @selector(bs_requestLocation));
         if (origReq && swizReq) method_exchangeImplementations(origReq, swizReq);
-
-        void (^triggerUI)(NSNotification *) = ^(NSNotification *note) {
-            (void)note;
-            [[BumpSpoofManager shared] setupUI];
-        };
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
-                                                          object:nil
-                                                           queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:triggerUI];
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-                                                          object:nil
-                                                           queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:triggerUI];
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeVisibleNotification
-                                                          object:nil
-                                                           queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:triggerUI];
     });
 }
 
@@ -1122,46 +1037,7 @@ static void BSSwizzleDelegateClass(Class delClass) {
 
 - (void)bs_setDelegate:(id<CLLocationManagerDelegate>)delegate {
     [[BumpSpoofManager shared] registerManager:self];
-    if (delegate) {
-        BSSwizzleDelegateClass([delegate class]);
-    }
     [self bs_setDelegate:delegate];
 }
 
-@end
-
-#pragma mark - Network & Cellular Region Emulation (BSSID + CTCarrier)
-
-static NSString *BSGenerateSpoofedBSSID(void) {
-    double lat = [BumpSpoofManager shared].latitude;
-    double lon = [BumpSpoofManager shared].longitude;
-    uint32_t latHash = (uint32_t)(fabs(lat * 10000.0));
-    uint32_t lonHash = (uint32_t)(fabs(lon * 10000.0));
-    return [NSString stringWithFormat:@"02:%02x:%02x:%02x:%02x:%02x",
-            (latHash >> 8) & 0xFF, latHash & 0xFF,
-            (lonHash >> 16) & 0xFF, (lonHash >> 8) & 0xFF, lonHash & 0xFF];
-}
-
-@implementation CTCarrier (BumpSpoof)
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class cls = [CTCarrier class];
-        struct { SEL orig; SEL swiz; } pairs[] = {
-            { @selector(carrierName),       @selector(bs_carrierName) },
-            { @selector(mobileCountryCode), @selector(bs_mobileCountryCode) },
-            { @selector(mobileNetworkCode), @selector(bs_mobileNetworkCode) },
-            { @selector(isoCountryCode),    @selector(bs_isoCountryCode) }
-        };
-        for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++) {
-            Method m1 = class_getInstanceMethod(cls, pairs[i].orig);
-            Method m2 = class_getInstanceMethod(cls, pairs[i].swiz);
-            if (m1 && m2) method_exchangeImplementations(m1, m2);
-        }
-    });
-}
-- (NSString *)bs_carrierName { return [BumpSpoofManager shared].enabled ? kSpoofedCarrierName : [self bs_carrierName]; }
-- (NSString *)bs_mobileCountryCode { return [BumpSpoofManager shared].enabled ? kSpoofedMCC : [self bs_mobileCountryCode]; }
-- (NSString *)bs_mobileNetworkCode { return [BumpSpoofManager shared].enabled ? kSpoofedMNC : [self bs_mobileNetworkCode]; }
-- (NSString *)bs_isoCountryCode { return [BumpSpoofManager shared].enabled ? kSpoofedISOCountry : [self bs_isoCountryCode]; }
 @end

@@ -166,7 +166,7 @@ class TestMachOInjector(unittest.TestCase):
 
             # Check Mach-O in zip
             patched_exec = zf.read(f"Payload/{app_name}/{exec_name}")
-            self.assertIn(b"@executable_path/Frameworks/BumpSpoof.dylib", patched_exec)
+            self.assertIn(b"@rpath/BumpSpoof.framework/BumpSpoof", patched_exec)
 
             # Check permissions
             info = zf.getinfo(f"Payload/{app_name}/{exec_name}")

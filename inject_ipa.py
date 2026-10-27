@@ -273,7 +273,24 @@ def patch_ipa(in_ipa: str, dylib_path: str, out_ipa: str) -> None:
         shutil.copy2(dylib_path, dest_dylib)
         print(f"[+] Placed {dylib_name} in {frameworks_dir}")
 
-        inject_macho(exec_path, f"@executable_path/Frameworks/{dylib_name}")
+        # Create first-class Apple Framework bundle for AltStore / Sideloadly recursive signing
+        fmwk_dir = os.path.join(frameworks_dir, "BumpSpoof.framework")
+        os.makedirs(fmwk_dir, exist_ok=True)
+        shutil.copy2(dylib_path, os.path.join(fmwk_dir, "BumpSpoof"))
+        fmwk_plist = {
+            "CFBundleExecutable": "BumpSpoof",
+            "CFBundleIdentifier": "co.amo.ios.bumpspoof",
+            "CFBundleName": "BumpSpoof",
+            "CFBundlePackageType": "FMWK",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1.0",
+            "MinimumOSVersion": "15.0"
+        }
+        with open(os.path.join(fmwk_dir, "Info.plist"), "wb") as fmp:
+            plistlib.dump(fmwk_plist, fmp)
+        print(f"[+] Packaged BumpSpoof.framework into {frameworks_dir}")
+
+        inject_macho(exec_path, "@rpath/BumpSpoof.framework/BumpSpoof")
 
         # On macOS, re-sign frameworks and main app bundle so code signatures are 100% valid
         if sys.platform == "darwin":
