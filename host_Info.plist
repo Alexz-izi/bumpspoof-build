@@ -20,6 +20,14 @@
     <true/>
     <key>MinimumOSVersion</key>
     <string>15.0</string>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UIRequiresFullScreen</key>
+    <true/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Location access for route simulation</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>

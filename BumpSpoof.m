@@ -21,6 +21,7 @@
 #import <stdlib.h>
 #import <string.h>
 #import <stdbool.h>
+#import <mach/mach.h>
 #import <math.h>
 
 typedef struct mach_header_64 mach_header_64_t;
@@ -69,6 +70,17 @@ static void bs_perform_rebinding_with_section(struct rebindings_entry *rebinding
                                               uint32_t *indirect_symtab) {
     uint32_t *indirect_symbol_indices = indirect_symtab + sect->reserved1;
     void **indirect_symbol_bindings = (void **)((uintptr_t)slide + sect->addr);
+
+    // Make section memory writable to prevent EXC_BAD_ACCESS (KERN_PROTECTION_FAILURE)
+    kern_return_t err = vm_protect(mach_task_self(),
+                                   (vm_address_t)indirect_symbol_bindings,
+                                   sect->size,
+                                   0,
+                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (err != KERN_SUCCESS) {
+        return;
+    }
+
     for (uint32_t i = 0; i < sect->size / sizeof(void *); i++) {
         uint32_t symtab_index = indirect_symbol_indices[i];
         if (symtab_index == INDIRECT_SYMBOL_ABS || symtab_index == INDIRECT_SYMBOL_LOCAL ||

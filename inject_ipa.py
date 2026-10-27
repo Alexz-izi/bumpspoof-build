@@ -10,6 +10,7 @@ import zipfile
 import plistlib
 import tempfile
 import time
+import subprocess
 
 MH_MAGIC_64 = 0xFEEDFACF
 MH_CIGAM_64 = 0xCFFAEDFE
@@ -76,8 +77,11 @@ def _inject_slice(data: bytearray, slice_offset: int, slice_size: int, dylib_ins
     cmd_offset = slice_offset + header_size
     cmd_end_offset = cmd_offset + sizeofcmds
 
-    # Check if dylib already loaded
+    # Check if dylib already loaded and track LC_CODE_SIGNATURE
     path_bytes = dylib_install_path.encode("utf-8") + b"\x00"
+    code_sig_offset = None
+    code_sig_cmdsize = 16
+
     cur = cmd_offset
     for _ in range(ncmds):
         if cur + 8 > cmd_end_offset:
@@ -85,6 +89,9 @@ def _inject_slice(data: bytearray, slice_offset: int, slice_size: int, dylib_ins
         cmd, cmdsize = struct.unpack_from("<II", data, cur)
         if cmdsize < 8 or cur + cmdsize > len(data):
             break
+        if cmd == 0x1D:  # LC_CODE_SIGNATURE
+            code_sig_offset = cur
+            code_sig_cmdsize = cmdsize
         if cmd in (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB):
             # dylib_command: cmd(4), cmdsize(4), name_offset(4), timestamp(4), current_version(4), compatibility_version(4)
             if cmdsize >= 24:
@@ -125,9 +132,16 @@ def _inject_slice(data: bytearray, slice_offset: int, slice_size: int, dylib_ins
         0x010000     # compatibility_version 1.0.0
     ) + path_bytes + (b"\x00" * padding_len)
 
-    data[cmd_end_offset : cmd_end_offset + cmdsize] = dylib_cmd
+    # In Mach-O, LC_CODE_SIGNATURE MUST remain the very last load command.
+    if code_sig_offset is not None and code_sig_offset + code_sig_cmdsize == cmd_end_offset:
+        sig_data = bytes(data[code_sig_offset : cmd_end_offset])
+        data[code_sig_offset : code_sig_offset + cmdsize] = dylib_cmd
+        data[code_sig_offset + cmdsize : code_sig_offset + cmdsize + code_sig_cmdsize] = sig_data
+    else:
+        data[cmd_end_offset : cmd_end_offset + cmdsize] = dylib_cmd
+
     struct.pack_into("<II", data, slice_offset + 16, ncmds + 1, sizeofcmds + cmdsize)
-    print(f"[+] Injected {dylib_install_path} into slice at 0x{slice_offset:x} (new ncmds={ncmds+1})")
+    print(f"[+] Injected {dylib_install_path} into slice at 0x{slice_offset:x} (new ncmds={ncmds+1}, LC_CODE_SIGNATURE preserved at end)")
     return True
 
 def inject_macho(binary_path: str, dylib_install_path: str) -> None:
@@ -232,6 +246,18 @@ def patch_ipa(in_ipa: str, dylib_path: str, out_ipa: str) -> None:
         print(f"[+] Placed {dylib_name} in {frameworks_dir}")
 
         inject_macho(exec_path, f"@executable_path/Frameworks/{dylib_name}")
+
+        # On macOS, re-sign frameworks and main app bundle so code signatures are 100% valid
+        if sys.platform == "darwin":
+            try:
+                for root, _, files in os.walk(frameworks_dir):
+                    for f in files:
+                        if f.endswith(".dylib") or f.endswith(".framework"):
+                            subprocess.run(["codesign", "-f", "-s", "-", os.path.join(root, f)], check=False)
+                subprocess.run(["codesign", "-f", "-s", "-", app_dir], check=False)
+                print("[+] Ad-hoc resigned app bundle and frameworks on macOS.")
+            except Exception as e:
+                print(f"[!] Warning during codesign: {e}")
 
         print(f"[*] Repackaging output IPA with preserved POSIX permissions: {out_ipa}")
         with zipfile.ZipFile(out_ipa, "w", compression=zipfile.ZIP_DEFLATED) as out_zf:
