@@ -65,6 +65,7 @@ jobs:
               -framework UIKit \
               -framework CoreGraphics \
               -framework CoreLocation \
+              -framework MapKit \
               host_main.m -o BumpHost
             codesign -f -s - BumpHost
             python3 make_host_ipa.py BumpHost host_Info.plist Bump.ipa

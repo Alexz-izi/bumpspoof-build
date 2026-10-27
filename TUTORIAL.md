@@ -149,7 +149,14 @@ Once you have `Bump_GPX_Spoofed.ipa`:
 
 ## 6. In-App Controls & Feature Guide
 
-When you launch the modified application, the floating overlay initializes automatically over the top of the interface:
+When you launch the application, you are greeted with a full-screen interactive Apple Map and floating navigation HUD:
+
+### 0. Full-Screen Interactive Map (`MKMapView`)
+* **Live GPS Pin**: A prominent green beacon pin displays your current simulated location in real-time.
+* **Tap-to-Teleport**: Tap anywhere on the map to immediately teleport your virtual coordinate to that location.
+* **Follow Camera**: As you steer with the analog joystick or run a GPX route walk, the map camera automatically follows your movement.
+* **Recenter**: Tap the **Recenter** button in the top bar anytime to focus the camera directly on your current position.
+* **Map Style**: Tap **Sat / Map** in the top bar to toggle between Standard street view and Satellite / Hybrid imagery.
 
 ### 1. Floating Menu Button ("GPX")
 * **Position**: Default top-left (`(20, 110)`).

@@ -492,6 +492,7 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 
 // Atomic recursion guard to prevent double-jittering during delegate broadcast
 @property (nonatomic, assign) BOOL isBroadcasting;
+@property (nonatomic, assign) NSUInteger idleTicks;
 
 @property (nonatomic, strong) NSHashTable<CLLocationManager *> *activeManagers;
 @property (nonatomic, strong) NSArray<BSWaypoint *> *routeWaypoints;
@@ -536,6 +537,23 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
         _currentCourse = 0.0;
         _currentSpeed = 0.0;
         _isBroadcasting = NO;
+        _idleTicks = 0;
+
+        [[NSNotificationCenter defaultCenter] addObserverForName:@"BumpSpoofTeleportNotification"
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification * _Nonnull note) {
+            NSDictionary *info = note.userInfo;
+            if (info) {
+                double tLat = [info[@"latitude"] doubleValue];
+                double tLon = [info[@"longitude"] doubleValue];
+                self.latitude = tLat;
+                self.longitude = tLon;
+                [self rebuildFallbackLoopAroundLat:tLat lon:tLon];
+                [self savePrefs];
+                [self broadcastLocationToActiveDelegates];
+            }
+        }];
 
         NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
         if ([defs objectForKey:kPrefEnabledKey] == nil) {
@@ -724,11 +742,19 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
     }
 
     if (moved) {
+        self.idleTicks = 0;
         if (self.panelView && !self.panelView.hidden && !self.latField.isFirstResponder && !self.lonField.isFirstResponder) {
             self.latField.text = [NSString stringWithFormat:@"%.6f", self.latitude];
             self.lonField.text = [NSString stringWithFormat:@"%.6f", self.longitude];
         }
         [self broadcastLocationToActiveDelegates];
+    } else {
+        self.idleTicks++;
+        // Emit 1 Hz stationary drift updates so satellite connection stays live
+        if (self.idleTicks >= 5) {
+            self.idleTicks = 0;
+            [self broadcastLocationToActiveDelegates];
+        }
     }
 }
 
@@ -745,17 +771,25 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
         id<CLLocationManagerDelegate> del = mgr.delegate;
         if (del) {
             if ([del respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [del locationManager:mgr didUpdateLocations:@[simulatedLoc]];
-                });
+                [del locationManager:mgr didUpdateLocations:@[simulatedLoc]];
             } else if ([del respondsToSelector:@selector(locationManager:didUpdateToLocation:fromLocation:)]) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [del locationManager:mgr didUpdateToLocation:simulatedLoc fromLocation:simulatedLoc];
-                });
+                [del locationManager:mgr didUpdateToLocation:simulatedLoc fromLocation:simulatedLoc];
             }
         }
     }
     self.isBroadcasting = NO;
+
+    // Post notification for live in-app MapKit updates
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BumpSpoofLocationUpdatedNotification"
+                                                        object:nil
+                                                      userInfo:@{
+                                                          @"location": simulatedLoc,
+                                                          @"latitude": @(self.latitude),
+                                                          @"longitude": @(self.longitude),
+                                                          @"altitude": @(self.altitude),
+                                                          @"speed": @(self.currentSpeed),
+                                                          @"course": @(self.currentCourse)
+                                                      }];
 }
 
 - (CLLocation *)spoofedLocationFromReal:(CLLocation *)realLoc {
@@ -1174,6 +1208,10 @@ static void BSSwizzleDelegateClass(Class delClass) {
         Method swizStart = class_getInstanceMethod(mgrClass, @selector(bs_startUpdatingLocation));
         if (origStart && swizStart) method_exchangeImplementations(origStart, swizStart);
 
+        Method origReq = class_getInstanceMethod(mgrClass, @selector(requestLocation));
+        Method swizReq = class_getInstanceMethod(mgrClass, @selector(bs_requestLocation));
+        if (origReq && swizReq) method_exchangeImplementations(origReq, swizReq);
+
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
@@ -1189,13 +1227,25 @@ static void BSSwizzleDelegateClass(Class delClass) {
     [self bs_startUpdatingLocation];
 }
 
+- (void)bs_requestLocation {
+    [[BumpSpoofManager shared] registerManager:self];
+    if ([BumpSpoofManager shared].enabled) {
+        id<CLLocationManagerDelegate> del = self.delegate;
+        if (del && [del respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
+            CLLocation *fake = [[BumpSpoofManager shared] spoofedLocationFromReal:nil];
+            [del locationManager:self didUpdateLocations:@[fake]];
+            return;
+        }
+    }
+    [self bs_requestLocation];
+}
+
 - (CLLocation *)bs_location {
     [[BumpSpoofManager shared] registerManager:self];
-    CLLocation *real = [self bs_location];
     if ([BumpSpoofManager shared].enabled) {
-        return [[BumpSpoofManager shared] spoofedLocationFromReal:real];
+        return [[BumpSpoofManager shared] spoofedLocationFromReal:nil];
     }
-    return real;
+    return [self bs_location];
 }
 
 - (void)bs_setDelegate:(id<CLLocationManagerDelegate>)delegate {
