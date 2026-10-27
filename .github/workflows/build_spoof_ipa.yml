@@ -50,19 +50,35 @@ jobs:
         if: ${{ github.event.inputs.ipa_url != '' }}
         run: curl -L "${{ github.event.inputs.ipa_url }}" -o Bump.ipa
 
+      - name: Prepare Host IPA (Standalone or External Decrypted)
+        run: |
+          if [ ! -f "Bump.ipa" ]; then
+            echo "[*] No external Bump.ipa provided. Building standalone native iOS host app..."
+            SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+            xcrun -sdk iphoneos clang -arch arm64 \
+              -O2 \
+              -isysroot "$SDK_PATH" \
+              -miphoneos-version-min=15.0 \
+              -fobjc-arc \
+              -Wall -Wextra \
+              -framework Foundation \
+              -framework UIKit \
+              -framework CoreGraphics \
+              -framework CoreLocation \
+              host_main.m -o BumpHost
+            codesign -f -s - BumpHost
+            python3 make_host_ipa.py BumpHost host_Info.plist Bump.ipa
+          fi
+
       - name: Inject Dylib & Enable Files.app GPX Drop
         run: |
-          if [ -f "Bump.ipa" ]; then
-            python3 inject_ipa.py Bump.ipa BumpSpoof.dylib Bump_GPX_Spoofed.ipa
-          else
-            echo "[*] No Bump.ipa provided. BumpSpoof.dylib compiled successfully."
-          fi
+          python3 inject_ipa.py Bump.ipa BumpSpoof.dylib Bump_GPX_Spoofed.ipa
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: BumpSpoof-iOS26.5-Build
-          if-no-files-found: warn
+          if-no-files-found: error
           path: |
-            BumpSpoof.dylib
             Bump_GPX_Spoofed.ipa
+            BumpSpoof.dylib
