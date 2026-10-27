@@ -16,7 +16,16 @@
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <mach-o/nlist.h>
+#import <dlfcn.h>
+#import <stdlib.h>
+#import <string.h>
+#import <stdbool.h>
 #import <math.h>
+
+typedef struct mach_header_64 mach_header_64_t;
+typedef struct segment_command_64 segment_command_64_t;
+typedef struct section_64 section_64_t;
+typedef struct nlist_64 nlist_64_t;
 
 #pragma mark - Embedded Dynamic Symbol Rebinding (Fishhook Engine)
 
@@ -59,7 +68,7 @@ static void bs_perform_rebinding_with_section(struct rebindings_entry *rebinding
                                               uint32_t *indirect_symtab) {
     uint32_t *indirect_symbol_indices = indirect_symtab + sect->reserved1;
     void **indirect_symbol_bindings = (void **)((uintptr_t)slide + sect->addr);
-    for (uint i = 0; i < sect->size / sizeof(void *); i++) {
+    for (uint32_t i = 0; i < sect->size / sizeof(void *); i++) {
         uint32_t symtab_index = indirect_symbol_indices[i];
         if (symtab_index == INDIRECT_SYMBOL_ABS || symtab_index == INDIRECT_SYMBOL_LOCAL ||
             symtab_index == (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) {
@@ -70,7 +79,7 @@ static void bs_perform_rebinding_with_section(struct rebindings_entry *rebinding
         bool symbol_name_longer_than_one = symbol_name[0] && symbol_name[1];
         struct rebindings_entry *cur = rebindings;
         while (cur) {
-            for (uint j = 0; j < cur->rebindings_nel; j++) {
+            for (uint32_t j = 0; j < cur->rebindings_nel; j++) {
                 if (symbol_name_longer_than_one && strcmp(&symbol_name[1], cur->rebindings[j].name) == 0) {
                     if (cur->rebindings[j].replaced != NULL &&
                         indirect_symbol_bindings[i] != cur->rebindings[j].replacement) {
@@ -92,13 +101,16 @@ static void bs_rebind_symbols_for_image(struct rebindings_entry *rebindings,
     Dl_info info;
     if (dladdr(header, &info) == 0) return;
 
+    if (header->magic != MH_MAGIC_64) return;
+    const mach_header_64_t *header64 = (const mach_header_64_t *)header;
+
     segment_command_64_t *cur_seg_cmd;
     segment_command_64_t *linkedit_segment = NULL;
     struct symtab_command *symtab_cmd = NULL;
     struct dysymtab_command *dysymtab_cmd = NULL;
 
     uintptr_t cur = (uintptr_t)header + sizeof(mach_header_64_t);
-    for (uint i = 0; i < header->ncmds; i++) {
+    for (uint32_t i = 0; i < header64->ncmds; i++) {
         struct load_command *lc = (struct load_command *)cur;
         if (lc->cmd == LC_SEGMENT_64) {
             cur_seg_cmd = (segment_command_64_t *)cur;
@@ -121,7 +133,7 @@ static void bs_rebind_symbols_for_image(struct rebindings_entry *rebindings,
     uint32_t *indirect_symtab = (uint32_t *)(linkedit_base + dysymtab_cmd->indirectsymoff);
 
     cur = (uintptr_t)header + sizeof(mach_header_64_t);
-    for (uint i = 0; i < header->ncmds; i++) {
+    for (uint32_t i = 0; i < header64->ncmds; i++) {
         struct load_command *lc = (struct load_command *)cur;
         if (lc->cmd == LC_SEGMENT_64) {
             cur_seg_cmd = (segment_command_64_t *)cur;
@@ -130,7 +142,7 @@ static void bs_rebind_symbols_for_image(struct rebindings_entry *rebindings,
                 cur += lc->cmdsize;
                 continue;
             }
-            for (uint j = 0; j < cur_seg_cmd->nsects; j++) {
+            for (uint32_t j = 0; j < cur_seg_cmd->nsects; j++) {
                 section_64_t *sect = (section_64_t *)(cur + sizeof(segment_command_64_t)) + j;
                 uint32_t section_type = sect->flags & SECTION_TYPE;
                 if (section_type == S_LAZY_SYMBOL_POINTERS ||
