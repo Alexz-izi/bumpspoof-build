@@ -36,6 +36,7 @@ jobs:
             -Wall -Wextra -Wno-deprecated-declarations \
             -framework Foundation \
             -framework UIKit \
+            -framework CoreGraphics \
             -framework CoreLocation \
             -framework QuartzCore \
             -framework CoreTelephony \

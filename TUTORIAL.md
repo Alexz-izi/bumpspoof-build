@@ -83,6 +83,7 @@ xcrun -sdk iphoneos clang -arch arm64 \
   -Wall -Wextra -Wno-deprecated-declarations \
   -framework Foundation \
   -framework UIKit \
+  -framework CoreGraphics \
   -framework CoreLocation \
   -framework QuartzCore \
   -framework CoreTelephony \

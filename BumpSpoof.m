@@ -6,6 +6,7 @@
 #import <Foundation/Foundation.h>
 #import <CoreLocation/CoreLocation.h>
 #import <UIKit/UIKit.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <CoreTelephony/CTCarrier.h>
@@ -1165,6 +1166,7 @@ static void BSSwizzleDelegateClass(Class delClass) {
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(NSNotification * _Nonnull note) {
+            (void)note;
             [[BumpSpoofManager shared] setupUI];
         }];
     });
