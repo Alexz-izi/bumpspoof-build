@@ -1,0 +1,65 @@
+# File: .github/workflows/build_spoof_ipa.yml
+name: Build Bump GPX Spoofer (iOS 26.5 Ready)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: 'Direct URL to decrypted Bump.ipa (optional if Bump.ipa is in repo root)'
+        required: false
+        default: ''
+
+jobs:
+  compile-and-inject:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Select Xcode Developer Directory
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Run Test Suite
+        run: python3 test_inject_ipa.py
+
+      - name: Compile BumpSpoof.dylib (arm64 / iOS 15.0 - 26.5 ABI)
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun -sdk iphoneos clang -arch arm64 \
+            -dynamiclib \
+            -O2 \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=15.0 \
+            -fobjc-arc \
+            -Wall -Wextra -Wno-deprecated-declarations \
+            -framework Foundation \
+            -framework UIKit \
+            -framework CoreLocation \
+            -framework QuartzCore \
+            -framework CoreTelephony \
+            -framework SystemConfiguration \
+            -framework NetworkExtension \
+            -install_name "@executable_path/Frameworks/BumpSpoof.dylib" \
+            BumpSpoof.m -o BumpSpoof.dylib
+          codesign -f -s - BumpSpoof.dylib
+
+      - name: Download Decrypted IPA if URL provided
+        if: ${{ github.event.inputs.ipa_url != '' }}
+        run: curl -L "${{ github.event.inputs.ipa_url }}" -o Bump.ipa
+
+      - name: Inject Dylib & Enable Files.app GPX Drop
+        run: |
+          if [ -f "Bump.ipa" ]; then
+            python3 inject_ipa.py Bump.ipa BumpSpoof.dylib Bump_GPX_Spoofed.ipa
+          else
+            echo "[*] No Bump.ipa provided. BumpSpoof.dylib compiled successfully."
+          fi
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BumpSpoof-iOS26.5-Build
+          if-no-files-found: warn
+          path: |
+            BumpSpoof.dylib
+            Bump_GPX_Spoofed.ipa
