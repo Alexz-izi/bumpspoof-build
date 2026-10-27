@@ -1,1 +1,1 @@
-make an full tutorial on how to build it an use it
+push it to github and start the workflow cuz im on widnows and i donw have an macbook 

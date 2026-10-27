@@ -2,6 +2,8 @@
 name: Build Bump GPX Spoofer (iOS 26.5 Ready)
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       ipa_url:
