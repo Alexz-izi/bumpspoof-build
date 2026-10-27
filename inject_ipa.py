@@ -217,6 +217,34 @@ def patch_ipa(in_ipa: str, dylib_path: str, out_ipa: str) -> None:
             raise FileNotFoundError("No .app bundle found inside Payload/")
         app_dir = os.path.join(payload_dir, apps[0])
 
+        # 1. Strip FairPlay DRM directories (SC_Info) across the entire package
+        for root, dirs, _ in os.walk(workdir):
+            for d in list(dirs):
+                if d == "SC_Info":
+                    sc_path = os.path.join(root, d)
+                    print(f"[*] Removing FairPlay DRM directory: {sc_path}")
+                    shutil.rmtree(sc_path, ignore_errors=True)
+                    dirs.remove(d)
+
+        # 2. Strip stale App Store code signatures so Sideloadly/AltStore can cleanly sign
+        for root, dirs, _ in os.walk(workdir):
+            for d in list(dirs):
+                if d == "_CodeSignature":
+                    cs_path = os.path.join(root, d)
+                    print(f"[*] Removing stale code signature: {cs_path}")
+                    shutil.rmtree(cs_path, ignore_errors=True)
+                    dirs.remove(d)
+
+        # 3. Strip App Extensions (PlugIns) which trigger fatal amfid entitlement crashes on personal Apple IDs
+        plugins_dir = os.path.join(app_dir, "PlugIns")
+        if os.path.isdir(plugins_dir):
+            print(f"[*] Stripping App Extensions directory: {plugins_dir}")
+            shutil.rmtree(plugins_dir, ignore_errors=True)
+
+        watch_dir = os.path.join(app_dir, "Watch")
+        if os.path.isdir(watch_dir):
+            shutil.rmtree(watch_dir, ignore_errors=True)
+
         info_plist_path = os.path.join(app_dir, "Info.plist")
         if not os.path.isfile(info_plist_path):
             raise FileNotFoundError(f"Missing Info.plist inside {app_dir}")

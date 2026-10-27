@@ -1,7 +1,7 @@
 // File: BumpSpoof.m
 // Target: arm64-apple-ios15.0 (compatible through iOS 26.5)
 // Features: Touch-Drag Analog Joystick + GPX Route Engine + BSSID/Carrier Spoof + Anti-Simulation Hooks + Fishhook Dynamic Rebinding
-// Frameworks: Foundation, UIKit, CoreLocation, QuartzCore, CoreTelephony, SystemConfiguration, NetworkExtension
+// Frameworks: Foundation, UIKit, CoreLocation, QuartzCore, CoreTelephony, SystemConfiguration
 
 #import <Foundation/Foundation.h>
 #import <CoreLocation/CoreLocation.h>
@@ -11,180 +11,12 @@
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <CoreTelephony/CTCarrier.h>
 #import <SystemConfiguration/CaptiveNetwork.h>
-#import <NetworkExtension/NetworkExtension.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <mach-o/dyld.h>
-#import <mach-o/loader.h>
-#import <mach-o/nlist.h>
-#import <dlfcn.h>
 #import <stdlib.h>
 #import <string.h>
 #import <stdbool.h>
-#import <mach/mach.h>
 #import <math.h>
-
-typedef struct mach_header_64 mach_header_64_t;
-typedef struct segment_command_64 segment_command_64_t;
-typedef struct section_64 section_64_t;
-typedef struct nlist_64 nlist_64_t;
-
-#pragma mark - Embedded Dynamic Symbol Rebinding (Fishhook Engine)
-
-struct rebinding {
-    const char *name;
-    void *replacement;
-    void **replaced;
-};
-
-struct rebindings_entry {
-    struct rebinding *rebindings;
-    size_t rebindings_nel;
-    struct rebindings_entry *next;
-};
-
-static struct rebindings_entry *_rebindings_head;
-
-static int bs_prepend_rebindings(struct rebindings_entry **head_ptr,
-                                 struct rebinding rebindings[],
-                                 size_t nel) {
-    struct rebindings_entry *new_entry = (struct rebindings_entry *)malloc(sizeof(struct rebindings_entry));
-    if (!new_entry) return -1;
-    new_entry->rebindings = (struct rebinding *)malloc(sizeof(struct rebinding) * nel);
-    if (!new_entry->rebindings) {
-        free(new_entry);
-        return -1;
-    }
-    memcpy(new_entry->rebindings, rebindings, sizeof(struct rebinding) * nel);
-    new_entry->rebindings_nel = nel;
-    new_entry->next = *head_ptr;
-    *head_ptr = new_entry;
-    return 0;
-}
-
-static void bs_perform_rebinding_with_section(struct rebindings_entry *rebindings,
-                                              section_64_t *sect,
-                                              intptr_t slide,
-                                              nlist_64_t *symtab,
-                                              char *strtab,
-                                              uint32_t *indirect_symtab) {
-    uint32_t *indirect_symbol_indices = indirect_symtab + sect->reserved1;
-    void **indirect_symbol_bindings = (void **)((uintptr_t)slide + sect->addr);
-
-    // Make section memory writable to prevent EXC_BAD_ACCESS (KERN_PROTECTION_FAILURE)
-    kern_return_t err = vm_protect(mach_task_self(),
-                                   (vm_address_t)indirect_symbol_bindings,
-                                   sect->size,
-                                   0,
-                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (err != KERN_SUCCESS) {
-        return;
-    }
-
-    for (uint32_t i = 0; i < sect->size / sizeof(void *); i++) {
-        uint32_t symtab_index = indirect_symbol_indices[i];
-        if (symtab_index == INDIRECT_SYMBOL_ABS || symtab_index == INDIRECT_SYMBOL_LOCAL ||
-            symtab_index == (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) {
-            continue;
-        }
-        uint32_t strtab_offset = symtab[symtab_index].n_un.n_strx;
-        char *symbol_name = strtab + strtab_offset;
-        bool symbol_name_longer_than_one = symbol_name[0] && symbol_name[1];
-        struct rebindings_entry *cur = rebindings;
-        while (cur) {
-            for (uint32_t j = 0; j < cur->rebindings_nel; j++) {
-                if (symbol_name_longer_than_one && strcmp(&symbol_name[1], cur->rebindings[j].name) == 0) {
-                    if (cur->rebindings[j].replaced != NULL &&
-                        indirect_symbol_bindings[i] != cur->rebindings[j].replacement) {
-                        *(cur->rebindings[j].replaced) = indirect_symbol_bindings[i];
-                    }
-                    indirect_symbol_bindings[i] = cur->rebindings[j].replacement;
-                    goto next_symbol;
-                }
-            }
-            cur = cur->next;
-        }
-    next_symbol:;
-    }
-}
-
-static void bs_rebind_symbols_for_image(struct rebindings_entry *rebindings,
-                                        const struct mach_header *header,
-                                        intptr_t slide) {
-    Dl_info info;
-    if (dladdr(header, &info) == 0) return;
-
-    if (header->magic != MH_MAGIC_64) return;
-    const mach_header_64_t *header64 = (const mach_header_64_t *)header;
-
-    segment_command_64_t *cur_seg_cmd;
-    segment_command_64_t *linkedit_segment = NULL;
-    struct symtab_command *symtab_cmd = NULL;
-    struct dysymtab_command *dysymtab_cmd = NULL;
-
-    uintptr_t cur = (uintptr_t)header + sizeof(mach_header_64_t);
-    for (uint32_t i = 0; i < header64->ncmds; i++) {
-        struct load_command *lc = (struct load_command *)cur;
-        if (lc->cmd == LC_SEGMENT_64) {
-            cur_seg_cmd = (segment_command_64_t *)cur;
-            if (strcmp(cur_seg_cmd->segname, SEG_LINKEDIT) == 0) {
-                linkedit_segment = cur_seg_cmd;
-            }
-        } else if (lc->cmd == LC_SYMTAB) {
-            symtab_cmd = (struct symtab_command *)cur;
-        } else if (lc->cmd == LC_DYSYMTAB) {
-            dysymtab_cmd = (struct dysymtab_command *)cur;
-        }
-        cur += lc->cmdsize;
-    }
-
-    if (!symtab_cmd || !dysymtab_cmd || !linkedit_segment || dysymtab_cmd->nindirectsyms == 0) return;
-
-    uintptr_t linkedit_base = (uintptr_t)slide + linkedit_segment->vmaddr - linkedit_segment->fileoff;
-    nlist_64_t *symtab = (nlist_64_t *)(linkedit_base + symtab_cmd->symoff);
-    char *strtab = (char *)(linkedit_base + symtab_cmd->stroff);
-    uint32_t *indirect_symtab = (uint32_t *)(linkedit_base + dysymtab_cmd->indirectsymoff);
-
-    cur = (uintptr_t)header + sizeof(mach_header_64_t);
-    for (uint32_t i = 0; i < header64->ncmds; i++) {
-        struct load_command *lc = (struct load_command *)cur;
-        if (lc->cmd == LC_SEGMENT_64) {
-            cur_seg_cmd = (segment_command_64_t *)cur;
-            if (strcmp(cur_seg_cmd->segname, SEG_DATA) != 0 &&
-                strcmp(cur_seg_cmd->segname, "__DATA_CONST") != 0) {
-                cur += lc->cmdsize;
-                continue;
-            }
-            for (uint32_t j = 0; j < cur_seg_cmd->nsects; j++) {
-                section_64_t *sect = (section_64_t *)(cur + sizeof(segment_command_64_t)) + j;
-                uint32_t section_type = sect->flags & SECTION_TYPE;
-                if (section_type == S_LAZY_SYMBOL_POINTERS ||
-                    section_type == S_NON_LAZY_SYMBOL_POINTERS) {
-                    bs_perform_rebinding_with_section(rebindings, sect, slide, symtab, strtab, indirect_symtab);
-                }
-            }
-        }
-        cur += lc->cmdsize;
-    }
-}
-
-static void _bs_rebind_symbols_for_image(const struct mach_header *header, intptr_t slide) {
-    bs_rebind_symbols_for_image(_rebindings_head, header, slide);
-}
-
-static int bs_rebind_symbols(struct rebinding rebindings[], size_t nel) {
-    int prep = bs_prepend_rebindings(&_rebindings_head, rebindings, nel);
-    if (prep < 0) return prep;
-    if (!_rebindings_head->next) {
-        _dyld_register_func_for_add_image(_bs_rebind_symbols_for_image);
-    } else {
-        uint32_t c = _dyld_image_count();
-        for (uint32_t i = 0; i < c; i++) {
-            _bs_rebind_symbols_for_image(_dyld_get_image_header(i), _dyld_get_image_vmaddr_slide(i));
-        }
-    }
-    return 0;
-}
 
 #pragma mark - Constants & Geodesic Mathematics
 
@@ -853,37 +685,50 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
 
 - (void)setupUI {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindowScene *ws = [self activeWindowScene];
+        @try {
+            UIApplication *app = nil;
+            @try {
+                app = [UIApplication sharedApplication];
+            } @catch (NSException *e) {
+                [self performSelector:@selector(setupUI) withObject:nil afterDelay:0.5];
+                return;
+            }
+            if (!app || !app.windows) {
+                [self performSelector:@selector(setupUI) withObject:nil afterDelay:0.5];
+                return;
+            }
 
-        if (!self.overlayWindow) {
-            if (ws) {
-                self.overlayWindow = [[BSPassthroughWindow alloc] initWithWindowScene:ws];
-                self.overlayWindow.frame = ws.coordinateSpace.bounds;
+            UIWindowScene *ws = [self activeWindowScene];
+
+            if (!self.overlayWindow) {
+                if (ws) {
+                    self.overlayWindow = [[BSPassthroughWindow alloc] initWithWindowScene:ws];
+                    self.overlayWindow.frame = ws.coordinateSpace.bounds;
+                } else {
+                    self.overlayWindow = [[BSPassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+                }
+                self.overlayWindow.backgroundColor = [UIColor clearColor];
+                self.overlayWindow.windowLevel = UIWindowLevelAlert + 100.0;
+                self.overlayWindow.hidden = NO;
+
+                UIViewController *rootVC = [[UIViewController alloc] init];
+                rootVC.view.backgroundColor = [UIColor clearColor];
+                rootVC.view.userInteractionEnabled = YES;
+                self.overlayWindow.rootViewController = rootVC;
             } else {
-                self.overlayWindow = [[BSPassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+                if (ws && self.overlayWindow.windowScene != ws) {
+                    self.overlayWindow.windowScene = ws;
+                }
+                self.overlayWindow.hidden = NO;
             }
-            self.overlayWindow.backgroundColor = [UIColor clearColor];
-            self.overlayWindow.windowLevel = UIWindowLevelAlert + 100.0;
-            self.overlayWindow.hidden = NO;
 
-            UIViewController *rootVC = [[UIViewController alloc] init];
-            rootVC.view.backgroundColor = [UIColor clearColor];
-            rootVC.view.userInteractionEnabled = YES;
-            self.overlayWindow.rootViewController = rootVC;
-        } else {
-            if (ws && self.overlayWindow.windowScene != ws) {
-                self.overlayWindow.windowScene = ws;
-            }
-            self.overlayWindow.hidden = NO;
-        }
+            UIView *container = self.overlayWindow.rootViewController.view;
+            if (self.floatingButton && self.floatingButton.superview == container) return;
 
-        UIView *container = self.overlayWindow.rootViewController.view;
-        if (self.floatingButton && self.floatingButton.superview == container) return;
-
-        [self.floatingButton removeFromSuperview];
-        [self.joyToggleButton removeFromSuperview];
-        [self.floatingJoystick removeFromSuperview];
-        [self.panelView removeFromSuperview];
+            [self.floatingButton removeFromSuperview];
+            [self.joyToggleButton removeFromSuperview];
+            [self.floatingJoystick removeFromSuperview];
+            [self.panelView removeFromSuperview];
 
         // Floating Pill ("GPX")
         self.floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -1017,6 +862,9 @@ static void BSProjectCoordinate(double lat, double lon, double bearingDeg, doubl
         [self.panelView addSubview:pasteGPXBtn];
 
         [container addSubview:self.panelView];
+        } @catch (NSException *exception) {
+            // Suppress early UI initialization exceptions
+        }
     });
 }
 
@@ -1243,9 +1091,6 @@ static void BSSwizzleDelegateClass(Class delClass) {
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:triggerUI];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[BumpSpoofManager shared] setupUI];
-        });
     });
 }
 
@@ -1320,46 +1165,3 @@ static NSString *BSGenerateSpoofedBSSID(void) {
 - (NSString *)bs_mobileNetworkCode { return [BumpSpoofManager shared].enabled ? kSpoofedMNC : [self bs_mobileNetworkCode]; }
 - (NSString *)bs_isoCountryCode { return [BumpSpoofManager shared].enabled ? kSpoofedISOCountry : [self bs_isoCountryCode]; }
 @end
-
-@implementation NEHotspotNetwork (BumpSpoof)
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class cls = [NEHotspotNetwork class];
-        Method origBSSID = class_getInstanceMethod(cls, @selector(BSSID));
-        Method swizBSSID = class_getInstanceMethod(cls, @selector(bs_BSSID));
-        if (origBSSID && swizBSSID) method_exchangeImplementations(origBSSID, swizBSSID);
-
-        Method origSSID = class_getInstanceMethod(cls, @selector(SSID));
-        Method swizSSID = class_getInstanceMethod(cls, @selector(bs_SSID));
-        if (origSSID && swizSSID) method_exchangeImplementations(origSSID, swizSSID);
-    });
-}
-- (NSString *)bs_BSSID { return [BumpSpoofManager shared].enabled ? BSGenerateSpoofedBSSID() : [self bs_BSSID]; }
-- (NSString *)bs_SSID { return [BumpSpoofManager shared].enabled ? kSpoofedSSID : [self bs_SSID]; }
-@end
-
-#pragma mark - Dynamic C-Function Interception (Replacing Static Interpose)
-
-static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
-
-static CFDictionaryRef bs_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    if (![BumpSpoofManager shared].enabled) {
-        if (orig_CNCopyCurrentNetworkInfo) return orig_CNCopyCurrentNetworkInfo(interfaceName);
-        return CNCopyCurrentNetworkInfo(interfaceName);
-    }
-    NSString *bssid = BSGenerateSpoofedBSSID();
-    NSDictionary *spoofedDict = @{
-        (__bridge NSString *)kCNNetworkInfoKeySSID: kSpoofedSSID,
-        (__bridge NSString *)kCNNetworkInfoKeyBSSID: bssid,
-        (__bridge NSString *)kCNNetworkInfoKeySSIDData: [kSpoofedSSID dataUsingEncoding:NSUTF8StringEncoding]
-    };
-    return CFBridgingRetain(spoofedDict);
-}
-
-__attribute__((constructor)) static void BSInitializeDynamicRebindings(void) {
-    struct rebinding rebs[] = {
-        { "CNCopyCurrentNetworkInfo", (void *)bs_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo }
-    };
-    bs_rebind_symbols(rebs, sizeof(rebs) / sizeof(rebs[0]));
-}
